@@ -1,3 +1,3 @@
 Assets
 
-Asset tracking for the common person.
+Asset tracking for iphone.
