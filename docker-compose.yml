@@ -1,0 +1,19 @@
+version: '2'
+services:
+    app:
+       image: asset-api
+       container_name: asset-api
+       ports:
+          - "80"
+       env_file:
+          - dbvars.env
+       build:
+          context: .
+          dockerfile: Dockerfile
+networks:
+  default:
+    external:
+      name: web
+
+
+
