@@ -55,7 +55,7 @@ def parse_headers_apikey(header):
 
 
 # ----------GENERAL------------------
-@app.get("/")
+@app.get("/", include_in_schema=False)
 def root() -> RedirectResponse:
     """Redirects the root ("/") to the /docs url."""
     return RedirectResponse(url='/docs')
