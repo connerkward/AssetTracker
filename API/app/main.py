@@ -1,6 +1,7 @@
 from starlette.responses import RedirectResponse
 from pymongo import MongoClient, errors, collection as pymongocollection
-from fastapi import FastAPI, Header, Response, status
+from fastapi import FastAPI, Header, Response, status, Security
+from fastapi.security.api_key import APIKeyHeader
 from typing import Optional
 from hashlib import blake2b
 from pydantic import BaseModel
@@ -14,6 +15,7 @@ client = MongoClient(os.environ['DATABASE_URL'], int(os.environ['DATABASE_PORT']
 database_name = os.environ['DATABASE_NAME'] # codesdb
 db = client[database_name]
 collection_post_schema = "-assets"
+api_key_header = APIKeyHeader(name="X-API-KEY", auto_error=False)
 
 class EditableAsset(BaseModel):
     contents: list
@@ -28,6 +30,7 @@ def get_apikey(username, password):
     return d
 
 
+# DEPRECATED
 def parse_headers(header):
     # Parse Header String
     try:
@@ -41,9 +44,12 @@ def parse_headers(header):
         raise
 
 
+# DEPRECATED
 def parse_headers_userdata(header):
     return parse_headers(header)['USERNAME'], parse_headers(header)['PASSWORD']
 
+
+# DEPRECATED
 def parse_headers_apikey(header):
     return parse_headers(header)['X-API-KEY']
 
@@ -57,27 +63,28 @@ def root() -> RedirectResponse:
 
 # GET /api/code {json} # "Get Existing Box"
 @app.get("/api/{item_code}")
-def get_item(item_code: str, header: Optional[str] = Header(None)):
+def get_item(item_code: str, api_key: Optional[str] = Security(api_key_header)):
     """
     Returns a JSON representing the given user via the provided ID.
     Does not return the _id ObjectID, as this is for internal mongo purposes.
     - param item_code: item code
     - return: JSON string
     """
-    collection = db[parse_headers_apikey(header)]
+    collection = db[api_key]
     ret = collection.find_one({"code": item_code})
     ret.pop("_id")
     return ret
 
 # GET /api/?query&query {json} # "Get Query"
-@app.get("/api/")
+@app.get("/api/search/")
 def get_item(limit: int = 10,
              inuse: Optional[bool] = None,
              serial: Optional[int] = None,
              notes: Optional[str] = None,
              name: Optional[str] = None,
-             header: Optional[str] = Header(None)):
-    collection = db[parse_headers_apikey(header)]
+             api_key: Optional[str] = Security(api_key_header)
+             ):
+    collection = db[api_key]
     query = {}
     if inuse is not None:
         query.update({f"inuse": inuse})
@@ -93,8 +100,8 @@ def get_item(limit: int = 10,
 
 # PUT /api/code {json} # "Enable New Box, Set Notes"
 @app.put("/api/{item_code}")
-def put_item(item_code: str, asset: EditableAsset, header: Optional[str] = Header(None)):
-    collection = db[parse_headers_apikey(header)]
+def put_item(item_code: str, asset: EditableAsset, api_key: Optional[str] = Security(api_key_header)):
+    collection = db[api_key]
     collection.update_one({"code": item_code},
                           {"$set": {"notes": asset.notes, "contents": asset.contents, "inuse": asset.inuse}})
     ret = collection.find_one({"code": item_code})
@@ -104,20 +111,22 @@ def put_item(item_code: str, asset: EditableAsset, header: Optional[str] = Heade
 
 # DELETE /api/code # "De-activate Existing Box"
 @app.delete("/api/{item_code}")
-def delete_item(item_code: str, header: Optional[str] = Header(None)):
-    collection = db[parse_headers_apikey(header)]
+def delete_item(item_code: str, response: Response, api_key: Optional[str] = Security(api_key_header)):
+    collection = db[api_key]
     collection.update_one({"code": item_code}, {"$set": {"inuse": False}})
-    return collection.find_one({"code": item_code})
+    response.status_code = status.HTTP_200_OK
+    ret = collection.find_one({"code": item_code})
+    ret.pop("_id")
+    return ret
 
 
 # ----------USERS------------------
 # GET /api/users  {json, no api key} # "Get api key for username/password. Essentially is a login"
-@app.get("/api/users/")
-def get_user(response: Response, header: Optional[str] = Header(None)):
+@app.get("/api/user/")
+def get_user(response: Response, username: Optional[str] = Header(None), password: Optional[str] = Header(None)):
     try:
-        # Parse Headers
-        username, password = parse_headers_userdata(header)
         # Check if user exists
+        username = username.lower()
         assert db.command({"usersInfo": username})["users"]
         # Hash username using password, check if collection exists
         key = get_apikey(username=username, password=password)
@@ -129,11 +138,9 @@ def get_user(response: Response, header: Optional[str] = Header(None)):
 
 
 # # POST /api/users  {json, no api key} # "Create new user,collection, role, return api key"
-@app.post("/api/users/")
-def post_user(response: Response, header: Optional[str] = Header(None)):
+@app.post("/api/user/")
+def post_user(response: Response, username: Optional[str] = Header(None), password: Optional[str] = Header(None)):
     ret_dict = dict()
-    # Parse Headers
-    username, password = parse_headers_userdata(header)
     # Create Collection and Mongo User
     print(db.create_collection(get_apikey(username=username, password=password)))
     print(db.command("createRole",
@@ -151,6 +158,7 @@ def post_user(response: Response, header: Optional[str] = Header(None)):
     ret_dict["X-API-KEY"] = key
 
     # POPULATE THE INIT COLLECTION FROM CODES.CSV
+    # !FUTURE update to use programatic generation
     collection = db[key]
     insert = list()
     with open('codes.csv', newline='') as csvfile:
@@ -168,13 +176,11 @@ def post_user(response: Response, header: Optional[str] = Header(None)):
     print(collection.insert(insert))
     return ret_dict
 
-# # DELETE /api/users  {admin api key} # "Create new user,collection, role, return api key"
-@app.delete("/api/users/")
-def delete_user(response: Response, header: Optional[str] = Header(None)):
+# # DELETE /api/users  {admin api key} # "Delete user, collection, and role"
+@app.delete("/api/user/")
+def delete_user(response: Response, username: Optional[str] = Header(None), password: Optional[str] = Header(None)):
     # !FUTURE check for admin api key
-    # Parse Headers
     try:
-        username, password = parse_headers_userdata(header)
         db.drop_collection(get_apikey(username=username, password=password))
         print(db.command({"dropRole": f'{get_apikey(username=username, password=password)}_CollectionRole'}))
         print(db.command({"dropUser": username}))
@@ -185,5 +191,3 @@ def delete_user(response: Response, header: Optional[str] = Header(None)):
     print(db.command({"dropRole": f'{get_apikey(username=username, password=password)}_CollectionRole'}))
     print(db.command({"dropUser": username}))
     return response
-
-
