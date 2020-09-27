@@ -2,26 +2,34 @@ from starlette.responses import RedirectResponse
 from pymongo import MongoClient, errors, collection as pymongocollection
 from fastapi import FastAPI, Header, Response, status, Security
 from fastapi.security.api_key import APIKeyHeader
-from typing import Optional
+import secrets
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from hashlib import blake2b
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, validator
+from typing import List, Optional
+
 import csv
 import os
 
 
 app = FastAPI()
-# CHANGE TO ENV
+security = HTTPBasic()
+
+api_admin_username = os.environ['API_USERNAME']
+api_admin_password = os.environ['API_PASSWORD']
+
 client = MongoClient(os.environ['DATABASE_URL'], int(os.environ['DATABASE_PORT'])) # https://stargods.net:43751/
 database_name = os.environ['DATABASE_NAME'] # codesdb
 db = client[database_name]
 collection_post_schema = "-assets"
 api_key_header = APIKeyHeader(name="X-API-KEY", auto_error=False)
 
-class EditableAsset(BaseModel):
-    contents: list
-    notes: str
-    inuse: bool
 
+class EditableAsset(BaseModel):
+    contents: list = Field(default=[], example=[])
+    notes: str = Field(default="", example="")
+    inuse = False
 
 def get_apikey(username, password):
     h = blake2b(key=bytes(password.encode("UTF-8")), digest_size=8)
@@ -53,10 +61,20 @@ def parse_headers_userdata(header):
 def parse_headers_apikey(header):
     return parse_headers(header)['X-API-KEY']
 
+def get_current_username(credentials: HTTPBasicCredentials = Depends(security)):
+    correct_username = secrets.compare_digest(credentials.username, api_admin_username)
+    correct_password = secrets.compare_digest(credentials.password, api_admin_password)
+    if not (correct_username and correct_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
 
 # ----------GENERAL------------------
 @app.get("/", include_in_schema=False)
-def root() -> RedirectResponse:
+def root(username: str = Depends(get_current_username)) -> RedirectResponse:
     """Redirects the root ("/") to the /docs url."""
     return RedirectResponse(url='/docs')
 
@@ -77,13 +95,14 @@ def get_item(item_code: str, api_key: Optional[str] = Security(api_key_header)):
 
 # GET /api/?query&query {json} # "Get Query"
 @app.get("/api/search/")
-def get_item(limit: int = 10,
-             inuse: Optional[bool] = None,
-             serial: Optional[int] = None,
-             notes: Optional[str] = None,
-             name: Optional[str] = None,
-             api_key: Optional[str] = Security(api_key_header)
-             ):
+def query_item(limit: int = 10,
+                inuse: Optional[bool] = None,
+                serial: Optional[int] = None,
+                notes: Optional[str] = None,
+                name: Optional[str] = None,
+                contents: Optional[list] = None,
+                api_key: Optional[str] = Security(api_key_header)
+               ):
     collection = db[api_key]
     query = {}
     if inuse is not None:
@@ -94,6 +113,8 @@ def get_item(limit: int = 10,
         query.update({f"notes": notes})
     if name is not None:
         query.update({f"name": name})
+    if contents is not None:
+        query.update({f"contents": contents})
     ret = [elem for elem in collection.find(query, limit=limit)]
     [elem.pop("_id") for elem in ret]
     return ret
