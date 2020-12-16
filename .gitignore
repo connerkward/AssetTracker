@@ -2,3 +2,4 @@ dbvars.env
 *.env
 /venv/
 /API/app/venv/
+__pycache__

@@ -15,21 +15,15 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 import csv
 import os
 import uvicorn
+import aiofiles  # required for certain FASTAPI File Responses
+from reportlab.lib.pagesizes import LETTER, A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, PageBreak, Spacer
+from reportlab.platypus import Image as platyImage
+from reportlab.lib.units import inch
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
+from reportlab.lib.styles import ParagraphStyle
+from zipfile import ZipFile
 
-# ---------------------------------------------------------------------
-""" DELETE!!!!!!!!!!!!!!"""
-"""
-a5user
-Soeba123
-Key: 652ba85baf9928aa
-Database information 
-"""
-os.environ["DATABASE_URL"] = "stargods.net"
-os.environ["DATABASE_PORT"] = "43751"
-os.environ["DATABASE_NAME"] = "codesdb"
-os.environ["API_USERNAME"] = "admin"
-os.environ["API_PASSWORD"] = "dingo"
-# ---------------------------------------------------------------------
 app = FastAPI()
 security = HTTPBasic()
 api_admin_username = os.environ['API_USERNAME']
@@ -41,7 +35,10 @@ collection_post_schema = "-assets"
 api_key_header = APIKeyHeader(name="X-API-KEY", auto_error=False)
 # ---------------------------------------------------------------------
 HALF_SIZE = False
-
+if HALF_SIZE:
+    LABEL_SIZE = (160, 200)  # 450, 200
+else:
+    LABEL_SIZE = (600, 200)
 
 class EditableAsset(BaseModel):
     contents: list = Field(default=[], example=[])
@@ -63,27 +60,29 @@ app.add_middleware(
 )
 
 
-def gen_label(entry_dict: dict):
-    if HALF_SIZE:
-        label_size = (160, 200)  # 450, 200
-    else:
-        label_size = (425, 200)
-    im = Image.new('RGB', label_size, (0, 0, 0))
+def gen_label(entry_dict: dict, api_key):
+    """
+    Generates a label from an entry.
+    :param entry_dict: Must contain all standard keys such as name, namecode, notes, contents, etc
+    :param api_key: your api key, only used to write to unique filename
+    :return: (filename, image), does not write to file
+    """
+    im = Image.new('RGB', LABEL_SIZE, (0, 0, 0))
     draw = ImageDraw.Draw(im)
     result_img = treepoem.generate_barcode("datamatrix", entry_dict["code"], options={"version": "12x12"})
     result_img = ImageOps.invert(result_img).convert('1')  # invert
     result_img = ImageOps.crop(result_img, 1)
     result_img = result_img.resize((100, 100))
     Image.Image.paste(im, result_img, (30, 25))
-    font = ImageFont.truetype(r'Futura.ttc', 40)
-    font2 = ImageFont.truetype(r'Futura.ttc', 35)
-    efon_font = ImageFont.truetype(r'Efon.ttf', 120)
+    font = ImageFont.truetype(r'fonts/Futura.ttc', 40)
+    font2 = ImageFont.truetype(r'fonts/Futura.ttc', 35)
+    efon_font = ImageFont.truetype(r'fonts/Efon.ttf', 120)
     draw.text((31, 130), entry_dict["code"], font=font)
     draw.text((160, 15), entry_dict["name"], font=font2)
-    draw.text((200, 75), entry_dict["namecode"], font=efon_font)
-    filename = f'generated-labels/{entry_dict["code"]}.png'
-    im.save(filename, quality=100)
-    return filename
+    draw.text((180, 75), entry_dict["namecode"], font=efon_font)
+    filename = f'generated-labels/{api_key}-{entry_dict["code"]}.png'
+    return filename, im
+
 
 def get_apikey(username, password):
     h = blake2b(key=bytes(password.encode("UTF-8")), digest_size=8)
@@ -144,26 +143,12 @@ def get_item(item_code: str, api_key: Optional[str] = Security(api_key_header)):
     - param item_code: item code
     - return: JSON string
     """
+    if item_code is None or not item_code:
+        raise HTTPException(status_code=404, detail="Invalid/Empty query")
     collection = db[api_key]
     ret = collection.find_one({"code": item_code})
     ret.pop("_id")
     return ret
-
-
-# GET /api/code {json} # "Get Existing Box Label Photo"
-@app.get("/api/{item_code}/label-photo")
-def get_item(item_code: str, api_key: Optional[str] = Security(api_key_header)):
-    """
-    Returns a JSON representing the given user via the provided ID.
-    Does not return the _id ObjectID, as this is for internal mongo purposes.
-    - param item_code: item code
-    - return: JSON string
-    """
-    collection = db[api_key]
-    ret = collection.find_one({"code": item_code})
-    ret.pop("_id")
-    label_directory = gen_label(ret)
-    return FileResponse(label_directory)
 
 
 # GET /api/next # "Get Next Available Box"
@@ -228,6 +213,148 @@ def delete_item(item_code: str, response: Response, api_key: Optional[str] = Sec
     ret.pop("_id")
     return ret
 
+
+# GET /api/code/label-photo # "Get Existing Box Label Photo"
+@app.get("/api/{item_code}/label-photo")
+def get_label_photo(item_code: str, api_key: Optional[str] = Security(api_key_header)):
+    """
+    Returns a JSON representing the given user via the provided ID.
+    Does not return the _id ObjectID, as this is for internal mongo purposes.
+    - param item_code: item code
+    - return: Byte object image of label
+    """
+    if item_code is None or not item_code:
+        raise HTTPException(status_code=404, detail="Invalid/Empty query")
+    collection = db[api_key]
+    ret = collection.find_one({"code": item_code})
+    ret.pop("_id")
+    filename, image = gen_label(ret, api_key)
+    image.save(filename, quality=100)
+    return FileResponse(filename)
+
+
+# DELETE /api/code/label-photo # "Get Existing Box Label Photo"
+@app.delete("/api/{item_code}/label-photo")
+def delete_label_photo(item_code: str, api_key: Optional[str] = Security(api_key_header)):
+    """
+    Returns a JSON representing the given user via the provided ID.
+    Does not return the _id ObjectID, as this is for internal mongo purposes.
+    - param item_code: item code
+    - return: Byte object image of label
+    """
+    os.remove(f"generated-labels/{api_key}-{item_code}.png")
+
+
+# GET /api/code/labels-pdf # "Get labels for list of codes "
+@app.post("/api/labels-pdf")
+def get_labels_pdf(item_codes: list, api_key: Optional[str] = Security(api_key_header)):
+    """
+    "Get labels for list of codes "
+    - param item_code: list of item codes
+    - return: Bytes object of PDF
+    """
+    if item_codes is None or item_codes[0] is None or not item_codes:
+        raise HTTPException(status_code=404, detail="Invalid query.")
+    collection = db[api_key]
+    # GENERATE ALL LABELS IN LIST
+    labels = list()
+    for item_code in item_codes:
+        ret = collection.find_one({"code": item_code})
+        ret.pop("_id")
+        filename, image = gen_label(ret, api_key)
+        image.save(filename, quality=100)
+        labels.append(filename)  # 0 is filename, 1 is image in memory
+    labels_iter = iter(labels)
+    # MAKE PDF OF LABELS
+    pdf_filename = f"generated-pdfs/{api_key}.pdf"
+    doc = SimpleDocTemplate(pdf_filename, pagesize=LETTER,
+                            rightMargin=72, leftMargin=72,
+                            topMargin=72, bottomMargin=18)
+    Story = []
+    data = list()
+    table_style = [
+        # ('GRID', (0, 1), (-1, -1), 1, colors.black),
+        ('ALIGN', (1, 1), (1, -1), 'CENTER')
+    ]
+    Story.append(Spacer(0.25 * inch, 0.25 * inch))
+    Story.append(Paragraph(f"This is an auto generated document."))
+    Story.append(Spacer(0.25 * inch, 0.25 * inch))
+    while True:
+        try:
+            row = list()
+            for i in range(0, 4):
+                if len(labels) < 2:
+                    entry = labels[0]
+                    entry = next(labels_iter)
+                    canvas = (platyImage(entry, width=LABEL_SIZE[0] / 6, height=LABEL_SIZE[1] / 5.5, hAlign=1),
+                              Spacer(0.1 * inch, 0.1 * inch),
+                              )
+                    row.append(canvas)
+                    print("one entry")
+                    raise StopIteration
+                else:
+                    entry = next(labels_iter)
+                    canvas = (platyImage(entry, width=LABEL_SIZE[0]/6, height=LABEL_SIZE[1]/5.5, hAlign=1),
+                              Spacer(0.1 * inch, 0.1 * inch),
+                              )
+                    row.append(canvas)
+            data.append(row)
+        except StopIteration:
+            data.append(row)
+            break
+    t = Table(data)
+    t.setStyle(table_style)
+    Story.append(t)
+    doc.build(Story)
+    return FileResponse(pdf_filename, filename=f"{api_key}.pdf")
+
+
+# DELETE /api/code/label-photo # "Get Existing Box Label Photo"
+@app.delete("/api/labels-pdf")
+def delete_labels_pdf(api_key: Optional[str] = Security(api_key_header)):
+    """
+    Deletes a previously generated pdf. Each api key only can have one pdf in cache.
+    """
+    os.remove(f"generated-pdfs/{api_key}.pdf")
+
+
+# GET /api/code/labels-zip # "Get zip of label photos"
+@app.post("/api/{item_code}/labels-zip")
+def get_labels_zip(item_codes: list, api_key: Optional[str] = Security(api_key_header)):
+    """
+    Get a zip file containing images of labels of requested item codes.
+    Each api key only can have one pdf in cache.
+    - param item_code: list of item codes
+    - return: Byte object zip of images of labels
+    """
+    if item_codes is None or item_codes[0] is None or not item_codes:
+        raise HTTPException(status_code=404, detail="Invalid query.")
+    collection = db[api_key]
+    filenames = list()
+    zip_filename = f"generated-zips/{api_key}.zip"
+    for item_code in item_codes:
+        ret = collection.find_one({"code": item_code})
+        ret.pop("_id")
+        filename, image = gen_label(ret, api_key)
+        image.save(filename, quality=100)
+        filenames.append(filename)  # 0 is filename, 1 is image in memory
+    with ZipFile(zip_filename, 'w') as zip:
+        for filename in filenames:
+            zip.write(filename)
+
+
+    filename = f"generated-zips/{api_key}.zip"
+    return FileResponse(filename, filename=f"{api_key}.zip")
+
+
+# DELETE /api/code/label-photo # "Get Existing Box Label Photo"
+@app.delete("/api/{item_code}/labels-zip")
+def delete_labels_zip(api_key: Optional[str] = Security(api_key_header)):
+    """
+    Deleted zip file associated with api key.
+    Each api key only can have one pdf in cache.
+    """
+    os.remove(f"generated-zips/{api_key}.zip")
 
 # ----------USERS------------------
 # GET /api/users  {json, no api key} # "Get api key for username/password. Essentially is a login"
