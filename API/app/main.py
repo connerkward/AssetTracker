@@ -1,5 +1,7 @@
 from starlette.responses import RedirectResponse
 from pymongo import MongoClient, errors, collection as pymongocollection
+from pymongo import TEXT
+from pymongo import errors
 from fastapi import FastAPI, Header, Response, status, Security
 from fastapi.security.api_key import APIKeyHeader
 import secrets
@@ -23,6 +25,21 @@ from reportlab.lib.units import inch
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
 from reportlab.lib.styles import ParagraphStyle
 from zipfile import ZipFile
+
+# ---------------------------------------------------------------------
+""" DELETE!!!!!!!!!!!!!!"""
+"""
+a5user
+Soeba123
+Key: 652ba85baf9928aa
+Database information 
+"""
+os.environ["DATABASE_URL"] = "stargods.net"
+os.environ["DATABASE_PORT"] = "43751"
+os.environ["DATABASE_NAME"] = "codesdb"
+os.environ["API_USERNAME"] = "admin"
+os.environ["API_PASSWORD"] = "dingo"
+# ---------------------------------------------------------------------
 
 app = FastAPI()
 security = HTTPBasic()
@@ -48,6 +65,7 @@ class EditableAsset(BaseModel):
 origins = [
     "http://localhost",
     "http://localhost:4200/",
+    "http://localhost:8000/",
     "*",
 ]
 
@@ -163,6 +181,45 @@ def get_next_free_item(api_key: Optional[str] = Security(api_key_header)):
     ret = collection.find_one({"inuse": False})
     ret.pop("_id")
     return ret
+
+# GET /api/next # "Get Next Available Box"
+@app.get("/api/search/{searchtext}")
+def get_free_search(searchtext: str, limit:int = 10, inuse_only=True, api_key: Optional[str] = Security(api_key_header)):
+    """
+    Returns a JSON representing the given user via the provided ID.
+    Does not return the _id ObjectID, as this is for internal mongo purposes.
+    - return: JSON string
+    """
+
+    index_name = f"{searchtext}-search"
+    collection = db[api_key]
+    index_created = False
+    try:
+        collection.drop_index(index_name)
+    except errors.OperationFailure:
+        print("index not dropped, does not exist")
+    try:
+        collection.create_index([("name", TEXT), ("code", TEXT), ("notes", TEXT), ("contents", TEXT)], name=index_name)
+        index_created = True
+        print('generated index created.')
+    except errors.OperationFailure:
+        print("new index NOT created.")
+    if inuse_only:
+        rets = [elem for elem in collection.find({"$text":{ "$search":searchtext}},
+                                   {"score": { "$meta": "textScore" }},)
+                if elem["inuse"] is True]
+    else:
+        rets = [elem for elem in collection.find({"$text": {"$search": searchtext}},
+                                                 {"score": {"$meta": "textScore"}})]
+    if index_created:
+        try:
+            collection.drop_index(index_name)
+        except errors.OperationFailure:
+            print("generated index not dropped.")
+    rets = sorted(rets, key=lambda x: x["score"], reverse=True)[0:limit]
+    for elem in rets:
+        elem.pop("_id")
+    return rets
 
 
 # GET /api/?query&query {json} # "Get Query"
@@ -319,7 +376,7 @@ def delete_labels_pdf(api_key: Optional[str] = Security(api_key_header)):
 
 
 # GET /api/code/labels-zip # "Get zip of label photos"
-@app.post("/api/{item_code}/labels-zip")
+@app.post("/api/labels-zip")
 def get_labels_zip(item_codes: list, api_key: Optional[str] = Security(api_key_header)):
     """
     Get a zip file containing images of labels of requested item codes.
@@ -348,7 +405,7 @@ def get_labels_zip(item_codes: list, api_key: Optional[str] = Security(api_key_h
 
 
 # DELETE /api/code/label-photo # "Get Existing Box Label Photo"
-@app.delete("/api/{item_code}/labels-zip")
+@app.delete("/api/labels-zip")
 def delete_labels_zip(api_key: Optional[str] = Security(api_key_header)):
     """
     Deleted zip file associated with api key.
