@@ -26,21 +26,6 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
 from reportlab.lib.styles import ParagraphStyle
 from zipfile import ZipFile
 
-# ---------------------------------------------------------------------
-""" DELETE!!!!!!!!!!!!!!"""
-"""
-a5user
-Soeba123
-Key: 652ba85baf9928aa
-Database information 
-"""
-os.environ["DATABASE_URL"] = "stargods.net"
-os.environ["DATABASE_PORT"] = "43751"
-os.environ["DATABASE_NAME"] = "codesdb"
-os.environ["API_USERNAME"] = "admin"
-os.environ["API_PASSWORD"] = "dingo"
-# ---------------------------------------------------------------------
-
 app = FastAPI()
 security = HTTPBasic()
 api_admin_username = os.environ['API_USERNAME']
